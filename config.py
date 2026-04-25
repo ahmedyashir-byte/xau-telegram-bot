@@ -6,13 +6,13 @@
 
 # 1. Get your token from @BotFather on Telegram
 
-BOT_TOKEN = “8772333489:AAE00PNCiUtB0BIuINaZGb2rsqKNv-cUOpo”
+BOT_TOKEN = “8309442490:AAHk1h3gCw-gS7esQjjZjpLCToxLXTOUsdA”
 
 # 2. Your Telegram chat/user ID (get it from @userinfobot)
 
 # Leave empty to disable auto-push; use /scan manually
 
-CHAT_ID = “46412255”
+CHAT_ID = “6185290624”
 
 # ── Market Settings ──────────────────────────
 
