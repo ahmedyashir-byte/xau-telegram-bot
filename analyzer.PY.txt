@@ -1,0 +1,196 @@
+“””
+Market Analyzer — Technical Analysis Engine
+Uses Yahoo Finance data with EMA, RSI, ATR
+“””
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from config import SYMBOLS, MIN_SIGNAL_STRENGTH, TIMEFRAME
+
+class MarketAnalyzer:
+
+```
+SYMBOL_DISPLAY = {
+    "XAUUSD=X": "XAU/USD",
+    "EURUSD=X": "EUR/USD",
+    "GBPUSD=X": "GBP/USD",
+}
+
+def __init__(self):
+    self.symbols = SYMBOLS
+
+# ─────────────────────────────────────────
+#  DATA FETCHING
+# ─────────────────────────────────────────
+
+def fetch_ohlcv(self, symbol: str, period: str = "5d", interval: str = None) -> pd.DataFrame:
+    tf = interval or TIMEFRAME
+    try:
+        df = yf.download(symbol, period=period, interval=tf, progress=False, auto_adjust=True)
+        df.dropna(inplace=True)
+        return df
+    except Exception as e:
+        print(f"[ERROR] fetch_ohlcv {symbol}: {e}")
+        return pd.DataFrame()
+
+def get_current_prices(self) -> dict:
+    result = {}
+    for sym in self.symbols:
+        try:
+            ticker = yf.Ticker(sym)
+            info = ticker.fast_info
+            price = info.last_price
+            prev = info.previous_close
+            change = ((price - prev) / prev) * 100 if prev else 0
+            result[self.SYMBOL_DISPLAY.get(sym, sym)] = {
+                "price": price,
+                "change": change
+            }
+        except Exception as e:
+            print(f"[ERROR] price {sym}: {e}")
+    return result
+
+# ─────────────────────────────────────────
+#  INDICATORS
+# ─────────────────────────────────────────
+
+def ema(self, series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(span=period, adjust=False).mean()
+
+def rsi(self, series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(com=period - 1, adjust=False).mean()
+    avg_loss = loss.ewm(com=period - 1, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+def atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+    high = df["High"].squeeze()
+    low  = df["Low"].squeeze()
+    close = df["Close"].squeeze()
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs()
+    ], axis=1).max(axis=1)
+    return tr.ewm(com=period - 1, adjust=False).mean()
+
+def macd(self, series: pd.Series):
+    fast = self.ema(series, 12)
+    slow = self.ema(series, 26)
+    macd_line = fast - slow
+    signal_line = self.ema(macd_line, 9)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+# ─────────────────────────────────────────
+#  SIGNAL LOGIC
+# ─────────────────────────────────────────
+
+def compute_signal_strength(self, conditions: list) -> int:
+    """Return signal strength 1-5 based on how many conditions pass."""
+    passed = sum(conditions)
+    total = len(conditions)
+    return max(1, round((passed / total) * 5))
+
+def analyze_symbol(self, symbol: str) -> dict | None:
+    df = self.fetch_ohlcv(symbol)
+    if df is None or len(df) < 60:
+        return None
+
+    close = df["Close"].squeeze()
+
+    # Indicators
+    ema20  = self.ema(close, 20)
+    ema50  = self.ema(close, 50)
+    rsi14  = self.rsi(close, 14)
+    atr14  = self.atr(df, 14)
+    macd_line, macd_sig, macd_hist = self.macd(close)
+
+    # Latest values
+    price    = float(close.iloc[-1])
+    e20      = float(ema20.iloc[-1])
+    e50      = float(ema50.iloc[-1])
+    rsi_val  = float(rsi14.iloc[-1])
+    atr_val  = float(atr14.iloc[-1])
+    macd_h   = float(macd_hist.iloc[-1])
+    macd_h_1 = float(macd_hist.iloc[-2])
+
+    # ── BUY Conditions ──
+    buy_conditions = [
+        e20 > e50,                         # EMA bullish cross
+        price > e20,                       # price above EMA20
+        rsi_val > 45 and rsi_val < 70,     # RSI not overbought
+        macd_h > 0 and macd_h > macd_h_1, # MACD histogram rising
+        float(close.iloc[-1]) > float(close.iloc[-3]),  # recent bullish candles
+    ]
+
+    # ── SELL Conditions ──
+    sell_conditions = [
+        e20 < e50,
+        price < e20,
+        rsi_val < 55 and rsi_val > 30,
+        macd_h < 0 and macd_h < macd_h_1,
+        float(close.iloc[-1]) < float(close.iloc[-3]),
+    ]
+
+    buy_score  = sum(buy_conditions)
+    sell_score = sum(sell_conditions)
+
+    if buy_score > sell_score and buy_score >= 3:
+        sig_type = "BUY"
+        strength = self.compute_signal_strength(buy_conditions)
+        sl  = price - (atr_val * 1.5)
+        tp1 = price + (atr_val * 2.0)
+        tp2 = price + (atr_val * 3.5)
+    elif sell_score > buy_score and sell_score >= 3:
+        sig_type = "SELL"
+        strength = self.compute_signal_strength(sell_conditions)
+        sl  = price + (atr_val * 1.5)
+        tp1 = price - (atr_val * 2.0)
+        tp2 = price - (atr_val * 3.5)
+    else:
+        return None
+
+    if strength < MIN_SIGNAL_STRENGTH:
+        return None
+
+    # pip size: gold uses 0.01, forex 0.0001
+    pip = 0.01 if "XAU" in symbol else 0.0001
+
+    def pips(a, b):
+        return abs(a - b) / pip
+
+    trend = "📈 Bullish" if e20 > e50 else "📉 Bearish"
+
+    return {
+        "symbol":    self.SYMBOL_DISPLAY.get(symbol, symbol),
+        "type":      sig_type,
+        "entry":     price,
+        "sl":        sl,
+        "tp1":       tp1,
+        "tp2":       tp2,
+        "sl_pips":   pips(price, sl),
+        "tp1_pips":  pips(price, tp1),
+        "tp2_pips":  pips(price, tp2),
+        "rsi":       rsi_val,
+        "atr":       atr_val,
+        "trend":     trend,
+        "strength":  strength,
+        "timeframe": TIMEFRAME,
+        "time":      datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+    }
+
+def scan_all(self) -> list:
+    signals = []
+    for sym in self.symbols:
+        sig = self.analyze_symbol(sym)
+        if sig:
+            signals.append(sig)
+    return signals
+```

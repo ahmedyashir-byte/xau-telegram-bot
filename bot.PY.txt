@@ -1,0 +1,231 @@
+“””
+XAUBOT - Telegram Signal Bot for XAU/USD & Forex
+Author: Generated for Yashir
+“””
+
+import asyncio
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+Application, CommandHandler, CallbackQueryHandler,
+ContextTypes, JobQueue
+)
+from config import BOT_TOKEN, CHAT_ID, SCAN_INTERVAL_MINUTES
+from analyzer import MarketAnalyzer
+
+logging.basicConfig(
+format=”%(asctime)s - %(name)s - %(levelname)s - %(message)s”,
+level=logging.INFO
+)
+logger = logging.getLogger(**name**)
+
+analyzer = MarketAnalyzer()
+
+# ─────────────────────────────────────────────
+
+# HELPERS
+
+# ─────────────────────────────────────────────
+
+def signal_emoji(signal_type: str) -> str:
+return “🟢” if signal_type == “BUY” else “🔴” if signal_type == “SELL” else “⚪”
+
+def format_signal_message(signal: dict) -> str:
+e = signal_emoji(signal[“type”])
+msg = (
+f”{e} *{signal[‘type’]} SIGNAL — {signal[‘symbol’]}*\n”
+f”━━━━━━━━━━━━━━━━━━━━\n”
+f”📍 *Entry:*  `{signal['entry']:.4f}`\n”
+f”🛑 *Stop Loss:*  `{signal['sl']:.4f}`  ({signal[‘sl_pips’]:.1f} pips)\n”
+f”🎯 *Take Profit 1:*  `{signal['tp1']:.4f}`  ({signal[‘tp1_pips’]:.1f} pips)\n”
+f”🎯 *Take Profit 2:*  `{signal['tp2']:.4f}`  ({signal[‘tp2_pips’]:.1f} pips)\n”
+f”━━━━━━━━━━━━━━━━━━━━\n”
+f”📊 *Trend:* {signal[‘trend’]}\n”
+f”💹 *RSI:* {signal[‘rsi’]:.1f}  |  *ATR:* {signal[‘atr’]:.4f}\n”
+f”⚡ *Strength:* {‘★’ * signal[‘strength’]}{‘☆’ * (5 - signal[‘strength’])}\n”
+f”🕐 *Timeframe:* {signal[‘timeframe’]}\n”
+f”📅 *Time:* {signal[‘time’]}”
+)
+return msg
+
+# ─────────────────────────────────────────────
+
+# COMMANDS
+
+# ─────────────────────────────────────────────
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+keyboard = [
+[InlineKeyboardButton(“📡 Scan Now”, callback_data=“scan”),
+InlineKeyboardButton(“📋 Status”, callback_data=“status”)],
+[InlineKeyboardButton(“⚙️ Settings”, callback_data=“settings”),
+InlineKeyboardButton(“❓ Help”, callback_data=“help”)],
+]
+reply_markup = InlineKeyboardMarkup(keyboard)
+await update.message.reply_text(
+“🤖 *XAUBOT — Market Signal Engine*\n\n”
+“Monitoring *XAU/USD* and *EUR/USD* for high-probability\n”
+“Buy/Sell signals with SL & TP levels.\n\n”
+“Use the menu below or type /scan to get signals now.”,
+parse_mode=“Markdown”,
+reply_markup=reply_markup
+)
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+msg = await update.message.reply_text(“🔍 Scanning markets… please wait.”)
+signals = analyzer.scan_all()
+if not signals:
+await msg.edit_text(“⚪ *No strong signals detected right now.*\n\nMarkets may be ranging. Try again later.”, parse_mode=“Markdown”)
+return
+await msg.delete()
+for sig in signals:
+await update.message.reply_text(format_signal_message(sig), parse_mode=“Markdown”)
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+prices = analyzer.get_current_prices()
+lines = [“📊 *Live Market Prices*\n━━━━━━━━━━━━━━━━━━━━”]
+for sym, data in prices.items():
+change_icon = “📈” if data[“change”] >= 0 else “📉”
+lines.append(
+f”{change_icon} *{sym}*: `{data['price']:.4f}`  “
+f”({’+’ if data[‘change’] >= 0 else ‘’}{data[‘change’]:.2f}%)”
+)
+lines.append(f”\n🕐 Auto-scan every *{SCAN_INTERVAL_MINUTES} min*”)
+await update.message.reply_text(”\n”.join(lines), parse_mode=“Markdown”)
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await update.message.reply_text(
+“📖 *XAUBOT Help*\n\n”
+“/start — Main menu\n”
+“/scan — Scan all markets for signals now\n”
+“/status — View current prices\n”
+“/xauusd — Analyze XAU/USD only\n”
+“/eurusd — Analyze EUR/USD only\n”
+“/stop — Pause auto-scanning\n”
+“/resume — Resume auto-scanning\n\n”
+“⚙️ *Signal Logic:*\n”
+“• EMA 20/50 crossover for trend\n”
+“• RSI (14) for momentum filter\n”
+“• ATR (14) for SL & TP sizing\n”
+“• Minimum signal strength ★★★ to alert”,
+parse_mode=“Markdown”
+)
+
+async def cmd_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE, symbol: str):
+msg = await update.message.reply_text(f”🔍 Analyzing *{symbol}*…”, parse_mode=“Markdown”)
+sig = analyzer.analyze_symbol(symbol)
+if sig:
+await msg.edit_text(format_signal_message(sig), parse_mode=“Markdown”)
+else:
+await msg.edit_text(f”⚪ *No clear signal for {symbol} right now.*”, parse_mode=“Markdown”)
+
+async def cmd_xauusd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await cmd_symbol(update, context, “XAUUSD=X”)
+
+async def cmd_eurusd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+await cmd_symbol(update, context, “EURUSD=X”)
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+jobs = context.job_queue.get_jobs_by_name(“auto_scan”)
+for job in jobs:
+job.schedule_removal()
+await update.message.reply_text(“⏸ Auto-scanning *paused*. Use /resume to restart.”, parse_mode=“Markdown”)
+
+async def cmd_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+context.job_queue.run_repeating(
+auto_scan_job,
+interval=SCAN_INTERVAL_MINUTES * 60,
+first=10,
+name=“auto_scan”,
+chat_id=update.effective_chat.id
+)
+await update.message.reply_text(
+f”▶️ Auto-scanning *resumed* — every *{SCAN_INTERVAL_MINUTES} min*.”,
+parse_mode=“Markdown”
+)
+
+# ─────────────────────────────────────────────
+
+# INLINE BUTTON HANDLER
+
+# ─────────────────────────────────────────────
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+query = update.callback_query
+await query.answer()
+if query.data == “scan”:
+await query.message.reply_text(“🔍 Scanning markets…”)
+signals = analyzer.scan_all()
+if not signals:
+await query.message.reply_text(“⚪ *No strong signals right now.*”, parse_mode=“Markdown”)
+else:
+for sig in signals:
+await query.message.reply_text(format_signal_message(sig), parse_mode=“Markdown”)
+elif query.data == “status”:
+await cmd_status(query, context)
+elif query.data == “help”:
+await cmd_help(query, context)
+elif query.data == “settings”:
+await query.message.reply_text(
+f”⚙️ *Settings*\n\n”
+f”Scan Interval: *{SCAN_INTERVAL_MINUTES} min*\n”
+f”Min Signal Strength: *★★★*\n”
+f”Symbols: XAU/USD, EUR/USD\n\n”
+f”Edit `config.py` to change these.”,
+parse_mode=“Markdown”
+)
+
+# ─────────────────────────────────────────────
+
+# AUTO-SCAN JOB
+
+# ─────────────────────────────────────────────
+
+async def auto_scan_job(context: ContextTypes.DEFAULT_TYPE):
+logger.info(“Running scheduled market scan…”)
+signals = analyzer.scan_all()
+for sig in signals:
+await context.bot.send_message(
+chat_id=context.job.chat_id,
+text=format_signal_message(sig),
+parse_mode=“Markdown”
+)
+logger.info(f”Signal sent: {sig[‘type’]} {sig[‘symbol’]}”)
+
+# ─────────────────────────────────────────────
+
+# MAIN
+
+# ─────────────────────────────────────────────
+
+def main():
+app = Application.builder().token(BOT_TOKEN).build()
+
+```
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("scan", cmd_scan))
+app.add_handler(CommandHandler("status", cmd_status))
+app.add_handler(CommandHandler("help", cmd_help))
+app.add_handler(CommandHandler("xauusd", cmd_xauusd))
+app.add_handler(CommandHandler("eurusd", cmd_eurusd))
+app.add_handler(CommandHandler("stop", cmd_stop))
+app.add_handler(CommandHandler("resume", cmd_resume))
+app.add_handler(CallbackQueryHandler(button_handler))
+
+# Schedule auto-scan
+if CHAT_ID:
+    app.job_queue.run_repeating(
+        auto_scan_job,
+        interval=SCAN_INTERVAL_MINUTES * 60,
+        first=30,
+        name="auto_scan",
+        chat_id=int(CHAT_ID)
+    )
+    logger.info(f"Auto-scan scheduled every {SCAN_INTERVAL_MINUTES} minutes → chat {CHAT_ID}")
+
+logger.info("XAUBOT started. Polling...")
+app.run_polling(allowed_updates=Update.ALL_TYPES)
+```
+
+if **name** == “**main**”:
+main()
